@@ -1,0 +1,1476 @@
+4. Detailed design:
+    for EVERY method use pseudo-code to delineate the input/output and
+    main functionalities
+
+## 4. Detailed Design
+
+### 4.1 Authentication Service -----------------------------------------
+
+#### 4.1.1 registerUser()
+
+FUNCTION registerUser(username, email, password, phone)
+INPUT: 
+  - username: String (3-30 chars)
+  - email: String (valid email format)
+  - password: String (min 8 chars)
+  - phone: String (10-15 digits)
+OUTPUT:
+  - registrationId: Integer OR error message
+
+PSEUDO-CODE:
+BEGIN
+  // Validate input
+  IF NOT isValidEmail(email) THEN
+    RETURN "Invalid email format"
+  END IF
+  
+  IF LENGTH(password) < 8 THEN
+    RETURN "Password too short"
+  END IF
+  
+  // Check for existing user
+  IF userExists(username) OR emailExists(email) THEN
+    RETURN "Username or email already registered"
+  END IF
+  
+  // Check blacklist
+  IF isBlacklisted(username, email) THEN
+    RETURN "Account banned from registration"
+  END IF
+  
+  // Hash password
+  passwordHash = hashPassword(password)
+  
+  // Create pending registration
+  registration = CREATE Registration(
+    username: username,
+    email: email,
+    password_hash: passwordHash,
+    phone: phone,
+    status: "PENDING",
+    created_at: getCurrentTimestamp()
+  )
+  
+  // Notify manager
+  notifyManager("New registration pending: " + username)
+  
+  RETURN registration.id
+END
+```
+
+#### 4.1.2 login()
+```
+FUNCTION login(username, password)
+INPUT:
+  - username: String
+  - password: String
+OUTPUT:
+  - sessionToken: String OR null
+
+PSEUDO-CODE:
+BEGIN
+  // Find user
+  user = findUserByUsername(username)
+  
+  IF user IS NULL THEN
+    logFailedAttempt(username)
+    RETURN null
+  END IF
+  
+  // Verify password
+  IF NOT verifyPassword(password, user.password_hash) THEN
+    logFailedAttempt(username)
+    RETURN null
+  END IF
+  
+  // Check account status
+  IF user.status == "DEREGISTERED" THEN
+    RETURN "Account deactivated"
+  END IF
+  
+  IF user.warnings >= 3 AND user.user_type == "CUSTOMER" THEN
+    RETURN "Account suspended due to warnings"
+  END IF
+  
+  // Create session
+  session = CREATE Session(
+    user_id: user.id,
+    token: generateToken(),
+    expires: getCurrentTime() + SESSION_DURATION,
+    last_activity: getCurrentTimestamp()
+  )
+  
+  // Update last login
+  UPDATE user SET last_login = getCurrentTimestamp()
+  
+  RETURN session.token
+END
+```
+
+#### 4.1.3 approveRegistration()
+```
+FUNCTION approveRegistration(registrationId, managerId)
+INPUT:
+  - registrationId: Integer
+  - managerId: Integer
+OUTPUT:
+  - userId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify manager permissions
+  IF NOT isManager(managerId) THEN
+    RETURN "Unauthorized"
+  END IF
+  
+  // Get registration
+  registration = findRegistrationById(registrationId)
+  
+  IF registration IS NULL OR registration.status != "PENDING" THEN
+    RETURN "Invalid registration"
+  END IF
+  
+  // Create user account
+  user = CREATE User(
+    username: registration.username,
+    email: registration.email,
+    password_hash: registration.password_hash,
+    phone: registration.phone,
+    user_type: "CUSTOMER",
+    created_at: getCurrentTimestamp(),
+    warnings: 0
+  )
+  
+  // Create wallet
+  wallet = CREATE Wallet(
+    user_id: user.id,
+    balance: 0.00,
+    last_updated: getCurrentTimestamp()
+  )
+  
+  // Update registration status
+  UPDATE registration SET 
+    status = "APPROVED",
+    approved_by = managerId,
+    approved_at = getCurrentTimestamp()
+  
+  // Send notification
+  sendEmail(user.email, "Account approved! Welcome to our restaurant.")
+  
+  RETURN user.id
+END
+```
+
+---
+
+### 4.2 Menu Service
+
+#### 4.2.1 createDish()
+```
+FUNCTION createDish(chefId, name, description, price, imageUrl)
+INPUT:
+  - chefId: Integer
+  - name: String (1-100 chars)
+  - description: String (max 500 chars)
+  - price: Decimal (> 0)
+  - imageUrl: String (valid URL)
+OUTPUT:
+  - dishId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify chef permissions
+  chef = findUserById(chefId)
+  IF chef IS NULL OR chef.emp_type != "CHEF" THEN
+    RETURN "Unauthorized: Not a chef"
+  END IF
+  
+  // Validate inputs
+  IF price <= 0 THEN
+    RETURN "Price must be positive"
+  END IF
+  
+  IF LENGTH(name) < 1 OR LENGTH(name) > 100 THEN
+    RETURN "Invalid dish name length"
+  END IF
+  
+  // Check for duplicate dish name by same chef
+  IF dishExistsByChef(chefId, name) THEN
+    RETURN "Dish name already exists in your menu"
+  END IF
+  
+  // Create dish
+  dish = CREATE Dish(
+    chef_id: chefId,
+    name: name,
+    description: description,
+    price: price,
+    image_url: imageUrl,
+    active: true,
+    created_at: getCurrentTimestamp(),
+    rating: 0.0,
+    rating_count: 0
+  )
+  
+  // Log activity
+  logActivity(chefId, "Created dish: " + name)
+  
+  RETURN dish.id
+END
+```
+
+#### 4.2.2 getPersonalizedMenu()
+```
+FUNCTION getPersonalizedMenu(userId)
+INPUT:
+  - userId: Integer (nullable for visitors)
+OUTPUT:
+  - menuData: Object containing recommended and popular dishes
+
+PSEUDO-CODE:
+BEGIN
+  menuData = {}
+  
+  IF userId IS NOT NULL THEN
+    // Get user's order history
+    orderHistory = getOrderHistory(userId)
+    
+    // Calculate most ordered dishes
+    dishFrequency = {}
+    FOR EACH order IN orderHistory DO
+      FOR EACH item IN order.items DO
+        IF dishFrequency[item.dish_id] EXISTS THEN
+          dishFrequency[item.dish_id] += item.quantity
+        ELSE
+          dishFrequency[item.dish_id] = item.quantity
+        END IF
+      END FOR
+    END FOR
+    
+    // Get top 5 most ordered
+    mostOrdered = sortByValue(dishFrequency, DESC).limit(5)
+    menuData.mostOrdered = getDishDetails(mostOrdered)
+    
+    // Get user's highest rated dishes
+    userRatings = getRatingsByUser(userId)
+    topRated = sortByRating(userRatings, DESC).limit(5)
+    menuData.topRated = getDishDetails(topRated)
+  ELSE
+    // Visitor - show popular dishes
+    popularDishes = SELECT dish_id, COUNT(*) as order_count
+                    FROM OrderItem
+                    GROUP BY dish_id
+                    ORDER BY order_count DESC
+                    LIMIT 10
+    menuData.popular = getDishDetails(popularDishes)
+    
+    // Show highest rated dishes overall
+    highestRated = SELECT * FROM Dish
+                   WHERE rating_count > 5
+                   ORDER BY rating DESC
+                   LIMIT 10
+    menuData.topRated = highestRated
+  END IF
+  
+  // Get featured chefs
+  topChefs = SELECT chef_id, AVG(rating) as avg_rating
+             FROM Dish
+             WHERE active = true
+             GROUP BY chef_id
+             ORDER BY avg_rating DESC
+             LIMIT 3
+  menuData.featuredChefs = getChefDetails(topChefs)
+  
+  // Get all active dishes
+  menuData.allDishes = SELECT * FROM Dish WHERE active = true
+  
+  RETURN menuData
+END
+```
+
+---
+
+### 4.3 Order Service
+
+#### 4.3.1 placeOrder()
+```
+FUNCTION placeOrder(customerId, cartItems, deliveryAddress)
+INPUT:
+  - customerId: Integer
+  - cartItems: Array of {dishId, quantity}
+  - deliveryAddress: String
+OUTPUT:
+  - orderId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify customer exists and is active
+  customer = findUserById(customerId)
+  IF customer IS NULL THEN
+    RETURN "Customer not found"
+  END IF
+  
+  IF customer.warnings >= 3 THEN
+    RETURN "Account suspended. Cannot place orders."
+  END IF
+  
+  // Calculate order total
+  subtotal = 0
+  orderItems = []
+  
+  FOR EACH item IN cartItems DO
+    dish = findDishById(item.dishId)
+    
+    IF dish IS NULL OR dish.active == false THEN
+      RETURN "Dish unavailable: " + item.dishId
+    END IF
+    
+    itemTotal = dish.price * item.quantity
+    subtotal += itemTotal
+    
+    orderItems.APPEND({
+      dish_id: dish.id,
+      quantity: item.quantity,
+      price: dish.price,
+      chef_id: dish.chef_id
+    })
+  END FOR
+  
+  // Apply VIP discount
+  discount = 0
+  isVIP = customer.is_vip
+  freeDelivery = false
+  
+  IF isVIP THEN
+    discount = subtotal * 0.05  // 5% discount
+    
+    // Check free delivery eligibility
+    vipOrders = countCompletedOrders(customerId, since_vip: true)
+    IF vipOrders % 3 == 2 THEN  // Every 3rd order
+      freeDelivery = true
+    END IF
+  END IF
+  
+  total = subtotal - discount
+  
+  // Check wallet balance
+  wallet = getWallet(customerId)
+  IF wallet.balance < total THEN
+    // Issue warning for insufficient funds
+    addWarning(customerId, "Insufficient balance for order")
+    RETURN "Insufficient funds. Please deposit money."
+  END IF
+  
+  // Create order
+  BEGIN TRANSACTION
+    order = CREATE Order(
+      customer_id: customerId,
+      status: "PENDING",
+      subtotal: subtotal,
+      discount: discount,
+      total: total,
+      delivery_address: deliveryAddress,
+      free_delivery: freeDelivery,
+      order_date: getCurrentTimestamp()
+    )
+    
+    // Create order items
+    FOR EACH item IN orderItems DO
+      CREATE OrderItem(
+        order_id: order.id,
+        dish_id: item.dish_id,
+        quantity: item.quantity,
+        price: item.price
+      )
+    END FOR
+    
+    // Deduct from wallet
+    wallet.balance -= total
+    UPDATE wallet
+    
+    // Log transaction
+    CREATE Transaction(
+      wallet_id: wallet.id,
+      type: "ORDER",
+      amount: -total,
+      description: "Order #" + order.id,
+      timestamp: getCurrentTimestamp()
+    )
+    
+    // Update customer stats
+    IF isVIP THEN
+      UPDATE customer SET spent = spent + total
+    ELSE
+      customer.spent += total
+      customer.orders += 1
+      
+      // Check VIP promotion
+      IF customer.spent > 100 AND customer.orders >= 3 THEN
+        complaints = countActiveComplaints(customerId, last_3_orders: true)
+        IF complaints == 0 THEN
+          promoteToVIP(customerId)
+        END IF
+      END IF
+    END IF
+  COMMIT TRANSACTION
+  
+  // Notify chefs
+  uniqueChefs = getUniqueChefs(orderItems)
+  FOR EACH chef IN uniqueChefs DO
+    notifyChef(chef.id, "New order received: Order #" + order.id)
+  END FOR
+  
+  // Queue for delivery bidding
+  createDeliveryBiddingQueue(order.id)
+  
+  RETURN order.id
+END
+```
+
+---
+
+### 4.4 Delivery Service
+
+#### 4.4.1 submitDeliveryBid()
+
+FUNCTION submitDeliveryBid(deliveryPersonId, orderId, bidAmount)
+INPUT:
+  - deliveryPersonId: Integer
+  - orderId: Integer
+  - bidAmount: Decimal
+OUTPUT:
+  - bidId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify delivery person
+  deliveryPerson = findUserById(deliveryPersonId)
+  IF deliveryPerson IS NULL OR deliveryPerson.emp_type != "DELIVERY" THEN
+    RETURN "Unauthorized: Not a delivery person"
+  END IF
+  
+  // Check order exists and is pending delivery
+  order = findOrderById(orderId)
+  IF order IS NULL THEN
+    RETURN "Order not found"
+  END IF
+  
+  IF order.status != "PENDING" THEN
+    RETURN "Order not available for bidding"
+  END IF
+  
+  // Validate bid amount
+  IF bidAmount < 0 THEN
+    RETURN "Invalid bid amount"
+  END IF
+  
+  // Check for existing bid
+  existingBid = findBid(deliveryPersonId, orderId)
+  IF existingBid IS NOT NULL THEN
+    // Update existing bid
+    UPDATE existingBid SET 
+      bid_amount = bidAmount,
+      updated_at = getCurrentTimestamp()
+    RETURN existingBid.id
+  END IF
+  
+  // Create new bid
+  bid = CREATE DeliveryBid(
+    order_id: orderId,
+    delivery_person_id: deliveryPersonId,
+    bid_amount: bidAmount,
+    status: "PENDING",
+    submitted_at: getCurrentTimestamp()
+  )
+  
+  // Notify manager
+  notifyManager("New delivery bid for Order #" + orderId)
+  
+  RETURN bid.id
+END
+```
+
+#### 4.4.2 assignDelivery()
+```
+FUNCTION assignDelivery(managerId, orderId, deliveryPersonId, memo)
+INPUT:
+  - managerId: Integer
+  - orderId: Integer
+  - deliveryPersonId: Integer
+  - memo: String (optional, required if not lowest bid)
+OUTPUT:
+  - deliveryId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify manager permissions
+  IF NOT isManager(managerId) THEN
+    RETURN "Unauthorized: Manager access required"
+  END IF
+  
+  // Get all bids for order
+  bids = getAllBids(orderId)
+  IF LENGTH(bids) == 0 THEN
+    RETURN "No bids available for this order"
+  END IF
+  
+  // Find selected bid
+  selectedBid = findBid(deliveryPersonId, orderId)
+  IF selectedBid IS NULL THEN
+    RETURN "Selected delivery person has not bid"
+  END IF
+  
+  // Find lowest bid
+  lowestBid = MIN(bids, by: bid_amount)
+  
+  // Check if memo is required
+  IF selectedBid.bid_amount > lowestBid.bid_amount THEN
+    IF memo IS NULL OR LENGTH(memo) < 10 THEN
+      RETURN "Justification memo required for non-lowest bid"
+    END IF
+  END IF
+  
+  BEGIN TRANSACTION
+    // Create delivery record
+    delivery = CREATE Delivery(
+      order_id: orderId,
+      delivery_person_id: deliveryPersonId,
+      bid_amount: selectedBid.bid_amount,
+      status: "ASSIGNED",
+      assigned_by: managerId,
+      manager_memo: memo,
+      assigned_at: getCurrentTimestamp()
+    )
+    
+    // Update order status
+    UPDATE order SET 
+      status = "ASSIGNED",
+      delivery_id = delivery.id
+    
+    // Update all bids
+    FOR EACH bid IN bids DO
+      IF bid.delivery_person_id == deliveryPersonId THEN
+        UPDATE bid SET status = "ACCEPTED"
+      ELSE
+        UPDATE bid SET status = "REJECTED"
+      END IF
+    END FOR
+  COMMIT TRANSACTION
+  
+  // Notify delivery person
+  notifyDeliveryPerson(deliveryPersonId, 
+    "You've been assigned Order #" + orderId)
+  
+  // Notify other bidders
+  FOR EACH bid IN bids DO
+    IF bid.delivery_person_id != deliveryPersonId THEN
+      notifyDeliveryPerson(bid.delivery_person_id,
+        "Your bid for Order #" + orderId + " was not selected")
+    END IF
+  END FOR
+  
+  RETURN delivery.id
+END
+```
+
+#### 4.4.3 updateDeliveryStatus()
+```
+FUNCTION updateDeliveryStatus(deliveryId, newStatus)
+INPUT:
+  - deliveryId: Integer
+  - newStatus: String (ASSIGNED/ON_ROUTE/DELIVERED)
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  delivery = findDeliveryById(deliveryId)
+  IF delivery IS NULL THEN
+    RETURN false
+  END IF
+  
+  // Validate status transition
+  validTransitions = {
+    "ASSIGNED": ["ON_ROUTE"],
+    "ON_ROUTE": ["DELIVERED"],
+    "DELIVERED": []
+  }
+  
+  IF newStatus NOT IN validTransitions[delivery.status] THEN
+    RETURN "Invalid status transition"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Update delivery
+    UPDATE delivery SET 
+      status = newStatus,
+      updated_at = getCurrentTimestamp()
+    
+    // Update timestamp based on status
+    IF newStatus == "ON_ROUTE" THEN
+      UPDATE delivery SET picked_up_at = getCurrentTimestamp()
+    ELSE IF newStatus == "DELIVERED" THEN
+      UPDATE delivery SET delivered_at = getCurrentTimestamp()
+      
+      // Update order status
+      order = findOrderById(delivery.order_id)
+      UPDATE order SET status = "COMPLETED"
+      
+      // Notify customer
+      notifyCustomer(order.customer_id, 
+        "Your order has been delivered!")
+    END IF
+  COMMIT TRANSACTION
+  
+  RETURN true
+END
+```
+
+---
+
+### 4.5 Reputation Service
+
+#### 4.5.1 fileComplaint()
+```
+FUNCTION fileComplaint(fromUserId, toUserId, type, description, orderId)
+INPUT:
+  - fromUserId: Integer
+  - toUserId: Integer
+  - type: String (CHEF/DELIVERY/CUSTOMER)
+  - description: String (min 20 chars)
+  - orderId: Integer (optional for context)
+OUTPUT:
+  - complaintId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Validate users exist
+  fromUser = findUserById(fromUserId)
+  toUser = findUserById(toUserId)
+  
+  IF fromUser IS NULL OR toUser IS NULL THEN
+    RETURN "Invalid user(s)"
+  END IF
+  
+  IF fromUserId == toUserId THEN
+    RETURN "Cannot file complaint against yourself"
+  END IF
+  
+  // Validate description
+  IF LENGTH(description) < 20 THEN
+    RETURN "Description must be at least 20 characters"
+  END IF
+  
+  // Verify transaction history if order specified
+  IF orderId IS NOT NULL THEN
+    order = findOrderById(orderId)
+    IF order IS NULL THEN
+      RETURN "Order not found"
+    END IF
+    
+    // Verify parties were involved in order
+    involved = false
+    IF type == "CHEF" THEN
+      involved = orderHasChef(orderId, toUserId)
+    ELSE IF type == "DELIVERY" THEN
+      involved = (order.delivery.delivery_person_id == toUserId)
+    ELSE IF type == "CUSTOMER" THEN
+      involved = (order.customer_id == toUserId OR 
+                  order.customer_id == fromUserId)
+    END IF
+    
+    IF NOT involved THEN
+      RETURN "No transaction history with target user"
+    END IF
+  END IF
+  
+  // Check for duplicate complaint
+  duplicate = findComplaint(fromUserId, toUserId, orderId, 
+                            status: "PENDING")
+  IF duplicate IS NOT NULL THEN
+    RETURN "Complaint already filed for this issue"
+  END IF
+  
+  // Calculate weight (VIP complaints count double)
+  weight = 1
+  IF fromUser.is_vip THEN
+    weight = 2
+  END IF
+  
+  // Create complaint
+  complaint = CREATE Complaint(
+    from_user_id: fromUserId,
+    to_user_id: toUserId,
+    type: type,
+    description: description,
+    order_id: orderId,
+    status: "PENDING",
+    weight: weight,
+    created_at: getCurrentTimestamp()
+  )
+  
+  // Notify manager
+  notifyManager("New complaint filed: #" + complaint.id)
+  
+  // Notify target user
+  notifyUser(toUserId, 
+    "A complaint has been filed against you. ID: #" + complaint.id)
+  
+  RETURN complaint.id
+END
+```
+
+#### 4.5.2 resolveComplaint()
+```
+FUNCTION resolveComplaint(complaintId, managerId, decision, managerNote)
+INPUT:
+  - complaintId: Integer
+  - managerId: Integer
+  - decision: String (UPHOLD/DISMISS)
+  - managerNote: String
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  // Verify manager
+  IF NOT isManager(managerId) THEN
+    RETURN "Unauthorized: Manager access required"
+  END IF
+  
+  // Get complaint
+  complaint = findComplaintById(complaintId)
+  IF complaint IS NULL OR complaint.status != "PENDING" THEN
+    RETURN "Invalid complaint or already resolved"
+  END IF
+  
+  fromUser = findUserById(complaint.from_user_id)
+  toUser = findUserById(complaint.to_user_id)
+  
+  BEGIN TRANSACTION
+    // Update complaint
+    UPDATE complaint SET
+      status = decision,
+      manager_id = managerId,
+      manager_note = managerNote,
+      resolved_at = getCurrentTimestamp()
+    
+    IF decision == "UPHOLD" THEN
+      // Add warning to target
+      addWarning(toUser.id, "Complaint upheld: " + complaint.description)
+      
+      // Track complaint for performance
+      IF complaint.type == "CHEF" THEN
+        chefComplaints = countUpheldComplaints(toUser.id, 
+                                               type: "CHEF")
+        IF chefComplaints >= 3 THEN
+          demoteChef(toUser.id)
+        END IF
+      ELSE IF complaint.type == "DELIVERY" THEN
+        deliveryComplaints = countUpheldComplaints(toUser.id, 
+                                                   type: "DELIVERY")
+        IF deliveryComplaints >= 3 THEN
+          demoteDeliveryPerson(toUser.id)
+        END IF
+      ELSE IF complaint.type == "CUSTOMER" THEN
+        // Customer warnings handled by addWarning function
+        IF toUser.warnings >= 3 THEN
+          deregisterCustomer(toUser.id)
+        ELSE IF toUser.is_vip AND toUser.warnings >= 2 THEN
+          demoteVIPToCustomer(toUser.id)
+        END IF
+      END IF
+      
+    ELSE IF decision == "DISMISS" THEN
+      // Add warning to complainant for frivolous complaint
+      addWarning(fromUser.id, "Complaint dismissed as without merit")
+      
+      IF fromUser.warnings >= 3 THEN
+        deregisterCustomer(fromUser.id)
+      END IF
+    END IF
+  COMMIT TRANSACTION
+  
+  // Notify both parties
+  notifyUser(fromUser.id, 
+    "Your complaint has been " + decision + " by management.")
+  notifyUser(toUser.id,
+    "The complaint against you has been " + decision + ".")
+  
+  RETURN true
+END
+```
+
+#### 4.5.3 fileCompliment()
+```
+FUNCTION fileCompliment(fromUserId, toUserId, type, description)
+INPUT:
+  - fromUserId: Integer
+  - toUserId: Integer  
+  - type: String (CHEF/DELIVERY)
+  - description: String
+OUTPUT:
+  - complimentId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Validate users
+  fromUser = findUserById(fromUserId)
+  toUser = findUserById(toUserId)
+  
+  IF fromUser IS NULL OR toUser IS NULL THEN
+    RETURN "Invalid user(s)"
+  END IF
+  
+  // Calculate weight
+  weight = 1
+  IF fromUser.is_vip THEN
+    weight = 2
+  END IF
+  
+  // Create compliment
+  compliment = CREATE Compliment(
+    from_user_id: fromUserId,
+    to_user_id: toUserId,
+    type: type,
+    description: description,
+    weight: weight,
+    created_at: getCurrentTimestamp()
+  )
+  
+  // Check for complaint cancellation
+  activeComplaints = findActiveComplaints(toUserId)
+  IF LENGTH(activeComplaints) > 0 THEN
+    // Cancel oldest complaint
+    complaint = activeComplaints[0]
+    UPDATE complaint SET 
+      status = "CANCELLED",
+      cancelled_by_compliment = compliment.id
+    
+    // Remove associated warning
+    removeWarning(toUserId, complaint.id)
+  END IF
+  
+  // Track compliments for performance
+  complimentCount = countCompliments(toUserId, type: type)
+  
+  IF type == "CHEF" AND complimentCount >= 3 THEN
+    giveChefBonus(toUserId)
+  ELSE IF type == "DELIVERY" AND complimentCount >= 3 THEN
+    giveDeliveryBonus(toUserId)
+  END IF
+  
+  // Notify recipient
+  notifyUser(toUserId, "You received a compliment!")
+  
+  RETURN compliment.id
+END
+```
+
+---
+
+### 4.6 Finance Service
+
+#### 4.6.1 depositFunds()
+```
+FUNCTION depositFunds(userId, amount)
+INPUT:
+  - userId: Integer
+  - amount: Decimal (> 0)
+OUTPUT:
+  - transactionId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Validate amount
+  IF amount <= 0 THEN
+    RETURN "Deposit amount must be positive"
+  END IF
+  
+  // Get wallet
+  wallet = getWallet(userId)
+  IF wallet IS NULL THEN
+    RETURN "Wallet not found"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Update balance
+    wallet.balance += amount
+    wallet.last_updated = getCurrentTimestamp()
+    UPDATE wallet
+    
+    // Log transaction
+    transaction = CREATE Transaction(
+      wallet_id: wallet.id,
+      type: "DEPOSIT",
+      amount: amount,
+      description: "Deposit to wallet",
+      timestamp: getCurrentTimestamp(),
+      balance_after: wallet.balance
+    )
+  COMMIT TRANSACTION
+  
+  // Notify user
+  notifyUser(userId, 
+    "Deposit successful. New balance: $" + wallet.balance)
+  
+  RETURN transaction.id
+END
+```
+
+#### 4.6.2 processRefund()
+```
+FUNCTION processRefund(orderId, reason)
+INPUT:
+  - orderId: Integer
+  - reason: String
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  // Get order
+  order = findOrderById(orderId)
+  IF order IS NULL THEN
+    RETURN "Order not found"
+  END IF
+  
+  IF order.status == "REFUNDED" THEN
+    RETURN "Order already refunded"
+  END IF
+  
+  // Get wallet
+  wallet = getWallet(order.customer_id)
+  
+  BEGIN TRANSACTION
+    // Credit wallet
+    wallet.balance += order.total
+    wallet.last_updated = getCurrentTimestamp()
+    UPDATE wallet
+    
+    // Log transaction
+    CREATE Transaction(
+      wallet_id: wallet.id,
+      type: "REFUND",
+      amount: order.total,
+      description: "Refund for Order #" + orderId + ": " + reason,
+      timestamp: getCurrentTimestamp(),
+      balance_after: wallet.balance
+    )
+    
+    // Update order
+    UPDATE order SET 
+      status = "REFUNDED",
+      refund_reason = reason,
+      refunded_at = getCurrentTimestamp()
+  COMMIT TRANSACTION
+  
+  // Notify customer
+  notifyUser(order.customer_id,
+    "Refund processed: $" + order.total + " for Order #" + orderId)
+  
+  RETURN true
+END
+```
+
+#### 4.6.3 closeAccount()
+```
+FUNCTION closeAccount(userId, managerId, reason)
+INPUT:
+  - userId: Integer
+  - managerId: Integer
+  - reason: String (VOLUNTARY/KICKED/BLACKLIST)
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  // Verify manager if kicked/blacklist
+  IF reason != "VOLUNTARY" THEN
+    IF NOT isManager(managerId) THEN
+      RETURN "Unauthorized"
+    END IF
+  END IF
+  
+  user = findUserById(userId)
+  wallet = getWallet(userId)
+  
+  IF user IS NULL THEN
+    RETURN "User not found"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Refund remaining balance
+    IF wallet.balance > 0 THEN
+      CREATE Transaction(
+        wallet_id: wallet.id,
+        type: "WITHDRAWAL",
+        amount: -wallet.balance,
+        description: "Account closure refund",
+        timestamp: getCurrentTimestamp()
+      )
+      
+      refundAmount = wallet.balance
+      wallet.balance = 0
+      UPDATE wallet
+    END IF
+    
+    // Cancel active orders
+    activeOrders = findOrders(userId, status: ["PENDING", "ASSIGNED"])
+    FOR EACH order IN activeOrders DO
+      processRefund(order.id, "Account closed")
+    END FOR
+    
+    // Update user status
+    UPDATE user SET 
+      status = "DEREGISTERED",
+      deregistered_at = getCurrentTimestamp(),
+      deregistered_by = managerId,
+      deregistration_reason = reason
+    
+    // Add to blacklist if kicked
+    IF reason == "KICKED" OR reason == "BLACKLIST" THEN
+      CREATE Blacklist(
+        username: user.username,
+        email: user.email,
+        reason: reason,
+        banned_date: getCurrentTimestamp(),
+        banned_by: managerId
+      )
+    END IF
+  COMMIT TRANSACTION
+  
+  // Notify user
+  IF refundAmount > 0 THEN
+    notifyUser(userId,
+      "Account closed. Refund of $" + refundAmount + " processed.")
+  END IF
+  
+  RETURN true
+END
+```
+
+---
+
+### 4.7 AI Service
+
+#### 4.7.1 answerQuestion()
+```
+FUNCTION answerQuestion(userId, question)
+INPUT:
+  - userId: Integer (nullable for visitors)
+  - question: String
+OUTPUT:
+  - response: Object {answer, source, kb_id}
+
+PSEUDO-CODE:
+BEGIN
+  // Sanitize input
+  question = sanitizeInput(question)
+  
+  IF LENGTH(question) < 3 THEN
+    RETURN {
+      answer: "Please ask a more specific question.",
+      source: "SYSTEM",
+      kb_id: null
+    }
+  END IF
+  
+  // Search local knowledge base
+  kbResults = searchKnowledgeBase(question)
+  
+  IF LENGTH(kbResults) > 0 THEN
+    // Found in knowledge base
+    bestMatch = kbResults[0]  // Highest relevance score
+    
+    // Log KB usage
+    CREATE KBUsageLog(
+      kb_id: bestMatch.id,
+      user_id: userId,
+      question: question,
+      timestamp: getCurrentTimestamp()
+    )
+    
+    RETURN {
+      answer: bestMatch.answer,
+      source: "KNOWLEDGE_BASE",
+      kb_id: bestMatch.id,
+      author: bestMatch.author_id,
+      requestRating: true
+    }
+  ELSE
+    // Not found, use LLM
+    try:
+      // Prepare context
+      context = buildRestaurantContext()  // Menu, policies, etc.
+      
+      // Call LLM (Ollama/Hugging Face)
+      llmResponse = callLLM(
+        model: "llama2",  // or any available model
+        prompt: "You are a helpful restaurant assistant. " +
+                "Context: " + context + "
+" +
+                "Question: " + question +
+                "
+Answer:",
+        max_tokens: 200
+      )
+      
+      // Log LLM usage
+      CREATE LLMUsageLog(
+        user_id: userId,
+        question: question,
+        response: llmResponse,
+        timestamp: getCurrentTimestamp()
+      )
+      
+      RETURN {
+        answer: llmResponse,
+        source: "LLM",
+        kb_id: null,
+        requestRating: false
+      }
+    catch error:
+      RETURN {
+        answer: "I'm having trouble answering right now. " +
+                "Please contact our manager for assistance.",
+        source: "ERROR",
+        kb_id: null
+      }
+  END IF
+END
+```
+
+#### 4.7.2 rateKBAnswer()
+```
+FUNCTION rateKBAnswer(userId, kbId, rating)
+INPUT:
+  - userId: Integer
+  - kbId: Integer
+  - rating: Integer (0-5)
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  // Validate rating
+  IF rating < 0 OR rating > 5 THEN
+    RETURN "Invalid rating"
+  END IF
+  
+  kbEntry = findKBEntry(kbId)
+  IF kbEntry IS NULL THEN
+    RETURN "KB entry not found"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Create rating record
+    CREATE KBRating(
+      kb_id: kbId,
+      user_id: userId,
+      rating: rating,
+      timestamp: getCurrentTimestamp()
+    )
+    
+    // Update KB entry average rating
+    allRatings = getAllRatings(kbId)
+    avgRating = AVERAGE(allRatings)
+    
+    UPDATE kbEntry SET 
+      rating = avgRating,
+      rating_count = LENGTH(allRatings)
+    
+    // Flag for review if rating is 0 (outrageous)
+    IF rating == 0 THEN
+      UPDATE kbEntry SET flagged = true
+      
+      // Notify manager
+      notifyManager(
+        "KB entry #" + kbId + " flagged for review (rating: 0)")
+    END IF
+  COMMIT TRANSACTION
+  
+  RETURN true
+END
+```
+
+#### 4.7.3 reviewFlaggedContent()
+```
+FUNCTION reviewFlaggedContent(kbId, managerId, action, reason)
+INPUT:
+  - kbId: Integer
+  - managerId: Integer
+  - action: String (KEEP/REMOVE/EDIT)
+  - reason: String
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  // Verify manager
+  IF NOT isManager(managerId) THEN
+    RETURN "Unauthorized"
+  END IF
+  
+  kbEntry = findKBEntry(kbId)
+  IF kbEntry IS NULL OR kbEntry.flagged == false THEN
+    RETURN "Invalid KB entry or not flagged"
+  END IF
+  
+  BEGIN TRANSACTION
+    IF action == "REMOVE" THEN
+      // Remove KB entry
+      DELETE kbEntry
+      
+      // Ban author from contributing
+      author = findUserById(kbEntry.author_id)
+      UPDATE author SET kb_contributor = false
+      
+      // Notify author
+      notifyUser(kbEntry.author_id,
+        "Your KB entry was removed: " + reason)
+        
+    ELSE IF action == "KEEP" THEN
+      // Unflag
+      UPDATE kbEntry SET 
+        flagged = false,
+        reviewed_by = managerId,
+        review_note = reason,
+        reviewed_at = getCurrentTimestamp()
+        
+    ELSE IF action == "EDIT" THEN
+      // Manager can edit the content
+      // (Separate function for actual editing)
+      UPDATE kbEntry SET 
+        flagged = false,
+        reviewed_by = managerId,
+        review_note = reason,
+        reviewed_at = getCurrentTimestamp()
+    END IF
+  COMMIT TRANSACTION
+  
+  RETURN true
+END
+```
+
+---
+
+### 4.8 HR Service
+
+#### 4.8.1 demoteChef()
+```
+FUNCTION demoteChef(chefId)
+INPUT:
+  - chefId: Integer
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  chef = findUserById(chefId)
+  IF chef IS NULL OR chef.emp_type != "CHEF" THEN
+    RETURN "Invalid chef"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Increment demotion count
+    chef.demotions += 1
+    
+    // Reduce salary by 15%
+    chef.salary = chef.salary * 0.85
+    
+    // Check for firing
+    IF chef.demotions >= 2 THEN
+      fireEmployee(chefId, "Two consecutive demotions")
+      RETURN true
+    END IF
+    
+    // Log HR action
+    CREATE HRAction(
+      employee_id: chefId,
+      action_type: "DEMOTION",
+      reason: "Performance below standards",
+      salary_change: -0.15,
+      timestamp: getCurrentTimestamp()
+    )
+    
+    UPDATE chef
+  COMMIT TRANSACTION
+  
+  // Notify chef
+  notifyUser(chefId,
+    "Performance review: You have been demoted. " +
+    "New salary: $" + chef.salary)
+  
+  RETURN true
+END
+```
+
+#### 4.8.2 promoteChef()
+```
+FUNCTION promoteChef(chefId)
+INPUT:
+  - chefId: Integer
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  chef = findUserById(chefId)
+  IF chef IS NULL OR chef.emp_type != "CHEF" THEN
+    RETURN "Invalid chef"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Reset demotions (fresh start)
+    chef.demotions = 0
+    
+    // Give bonus (20% of current salary)
+    bonusAmount = chef.salary * 0.20
+    
+    // Optional: Increase base salary
+    chef.salary = chef.salary * 1.10  // 10% raise
+    
+    // Log HR action
+    CREATE HRAction(
+      employee_id: chefId,
+      action_type: "PROMOTION",
+      reason: "Excellent performance",
+      salary_change: 0.10,
+      bonus: bonusAmount,
+      timestamp: getCurrentTimestamp()
+    )
+    
+    // Clear recent complaints (rewarded behavior)
+    clearComplimentCount(chefId)
+    
+    UPDATE chef
+  COMMIT TRANSACTION
+  
+  // Notify chef
+  notifyUser(chefId,
+    "Congratulations! You've earned a bonus of $" + bonusAmount +
+    " and a 10% raise. New salary: $" + chef.salary)
+  
+  RETURN true
+END
+```
+
+#### 4.8.3 fireEmployee()
+```
+FUNCTION fireEmployee(employeeId, reason)
+INPUT:
+  - employeeId: Integer
+  - reason: String
+OUTPUT:
+  - success: Boolean
+
+PSEUDO-CODE:
+BEGIN
+  employee = findUserById(employeeId)
+  IF employee IS NULL THEN
+    RETURN "Employee not found"
+  END IF
+  
+  IF employee.user_type != "EMPLOYEE" THEN
+    RETURN "Not an employee"
+  END IF
+  
+  BEGIN TRANSACTION
+    // Update status
+    UPDATE employee SET
+      status = "TERMINATED",
+      termination_date = getCurrentTimestamp(),
+      termination_reason = reason
+    
+    // Deactivate dishes if chef
+    IF employee.emp_type == "CHEF" THEN
+      UPDATE Dish SET active = false 
+      WHERE chef_id = employeeId
+    END IF
+    
+    // Cancel assigned deliveries if delivery person
+    IF employee.emp_type == "DELIVERY" THEN
+      activeDeliveries = findDeliveries(employeeId, 
+                                       status: ["ASSIGNED", "ON_ROUTE"])
+      FOR EACH delivery IN activeDeliveries DO
+        // Reassign to bidding
+        UPDATE delivery SET status = "UNASSIGNED"
+        createDeliveryBiddingQueue(delivery.order_id)
+      END FOR
+    END IF
+    
+    // Log HR action
+    CREATE HRAction(
+      employee_id: employeeId,
+      action_type: "TERMINATION",
+      reason: reason,
+      timestamp: getCurrentTimestamp()
+    )
+  COMMIT TRANSACTION
+  
+  // Notify employee
+  notifyUser(employeeId,
+    "Employment terminated. Reason: " + reason)
+  
+  RETURN true
+END
+```
+
+---
+
+### 4.9 Discussion Forum Service
+
+#### 4.9.1 createThread()
+```
+FUNCTION createThread(authorId, topic, content)
+INPUT:
+  - authorId: Integer
+  - topic: String
+  - content: String
+OUTPUT:
+  - threadId: Integer OR error
+
+PSEUDO-CODE:
+BEGIN
+  // Verify user is customer or VIP
+  user = findUserById(authorId)
+  IF user IS NULL OR user.user_type == "VISITOR" THEN
+    RETURN "Must be registered to create threads"
+  END IF
+  
+  // Validate input
+  IF LENGTH(topic) < 5 OR LENGTH(topic) > 200 THEN
+    RETURN "Topic must be 5-200 characters"
+  END IF
+  
+  IF LENGTH(content) < 20 THEN
+    RETURN "Content must be at least 20 characters"
+  END IF
+  
+  // Check for spam (max 5 threads per hour)
+  recentThreads = countThreads(authorId, 
+                               since: getCurrentTime() - 1_HOUR)
+  IF recentThreads >= 5 THEN
+    RETURN "Thread creation limit reached. Please wait."
+  END IF
+  
+  // Create thread
+  thread = CREATE DiscussionThread(
+    author_id: authorId,
+    topic: topic,
+    content: content,
+    locked: false,
+    created_at: getCurrentTimestamp(),
+    last_activity: getCurrentTimestamp()
+  )
+  
+  // Notify subscribers (future feature)
+  // notifySubscribers("New discussion: " + topic)
+  
+  RETURN thread.id
+END
+
+
+
+    
